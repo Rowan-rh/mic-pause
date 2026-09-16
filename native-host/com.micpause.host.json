@@ -1,0 +1,9 @@
+{
+  "name": "com.micpause.host",
+  "description": "Mic Pause - 系统级麦克风活动监听",
+  "path": "/absolute/path/to/mic-pause/native-host/mic-monitor",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://EXTENSION_ID_HERE/"
+  ]
+}

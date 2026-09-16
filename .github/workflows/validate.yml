@@ -1,0 +1,26 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check JavaScript
+        run: |
+          for file in extension/*.js extension/adapters/*.js; do
+            node --check "$file"
+          done
+
+      - name: Check manifest
+        run: node -e 'JSON.parse(require("fs").readFileSync("extension/manifest.json", "utf8"))'
+
+      - name: Check shell scripts
+        run: bash -n native-host/build.sh native-host/install.sh
+
+      - name: Build native host
+        run: swiftc -O -framework CoreAudio -framework AudioToolbox -framework Foundation -o "$RUNNER_TEMP/mic-monitor" native-host/mic-monitor.swift

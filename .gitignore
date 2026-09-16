@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Generated native host binary
+native-host/mic-monitor
+
+# Local logs and temporary files
+*.log
+*.tmp
+tmp/
+
+# Editor / environment files
+.idea/
+.vscode/
+.env
+.env.*

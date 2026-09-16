@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "Mic Pause — 麦克风占用自动暂停视频",
+  "version": "0.1.0",
+  "description": "检测 macOS 麦克风占用，自动暂停浏览器视频；麦克风释放后恢复插件暂停的视频。",
+  "minimum_chrome_version": "102",
+  "permissions": [
+    "nativeMessaging",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": [
+        "adapters/youtube.js",
+        "adapters/bilibili.js",
+        "adapters/vimeo.js",
+        "adapters/netflix.js",
+        "adapters/generic.js",
+        "adapters/index.js",
+        "content.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["page-bridge.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
+  "action": {
+    "default_title": "Mic Pause",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
