@@ -12,6 +12,7 @@ const state = {
   micSources: new Set(),
   // 设置
   enabled: true,
+  excludedSites: [],
   // native port
   port: null,
   // 重连 backoff
@@ -59,7 +60,7 @@ function onNativeMessage(msg) {
       addMicSource("system");
       break;
     case "mic_stopped":
-      removeSystemSourceAndStaleTabSources();
+      removeMicSource("system");
       break;
     case "error":
       console.error("[mic-pause] native error:", msg.message);
@@ -69,57 +70,59 @@ function onNativeMessage(msg) {
   }
 }
 
-function removeSystemSourceAndStaleTabSources() {
-  state.micSources.delete("system");
-  // Native CoreAudio 已确认所有输入设备都停止。网页有时只会 mute track，
-  // 不会及时发出 stopped 事件，这些残留标记不能阻塞视频恢复。
-  for (const source of state.micSources) {
-    if (source.startsWith("tab:")) state.micSources.delete(source);
-  }
-  if (state.micSources.size === 0 && state.enabled) broadcastPlay();
-  refreshIcon();
-}
-
 // ---------- Mic source aggregation ----------
 
 function addMicSource(src) {
   if (state.micSources.has(src)) return;
   const wasInactive = state.micSources.size === 0;
   state.micSources.add(src);
-  if (wasInactive && state.enabled) broadcastPause();
+  if (wasInactive) syncControlledTabs();
   refreshIcon();
 }
 
 function removeMicSource(src) {
   if (!state.micSources.has(src)) return;
   state.micSources.delete(src);
-  if (state.micSources.size === 0) {
-    if (state.enabled) broadcastPlay();
-  }
+  if (state.micSources.size === 0) syncControlledTabs();
   refreshIcon();
 }
 
 // ---------- Tab broadcast ----------
 
-async function broadcastPause() {
-  // 受控站点列表
-  const controlled = await getControlledTabs();
-  for (const tab of controlled) {
-    // 跳过已经在播放的就跳过：content script 内部判断
-    try {
-      await chrome.tabs.sendMessage(tab.id, { type: "cmd", action: "pause" });
-    } catch (e) {
-      // tab 可能没加载 content script 或已关闭
-    }
+function normalizeHost(host) {
+  return String(host || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/, "")
+    .replace(/^www\./, "");
+}
+
+function isExcludedUrl(url) {
+  try {
+    const host = normalizeHost(new URL(url).hostname);
+    return state.excludedSites.some((site) => {
+      const excludedHost = normalizeHost(site);
+      return host === excludedHost || host.endsWith(`.${excludedHost}`);
+    });
+  } catch (_error) {
+    return false;
   }
 }
 
-async function broadcastPlay() {
+async function syncControlledTabs() {
   const controlled = await getControlledTabs();
-  for (const tab of controlled) {
-    try {
-      await chrome.tabs.sendMessage(tab.id, { type: "cmd", action: "play" });
-    } catch (e) {}
+  const shouldPause = state.enabled && state.micSources.size > 0;
+  await Promise.all(controlled.map((tab) => sendTabCommand(
+    tab,
+    shouldPause && !isExcludedUrl(tab.url) ? "pause" : "play"
+  )));
+}
+
+async function sendTabCommand(tab, action) {
+  try {
+    await chrome.tabs.sendMessage(tab.id, { type: "cmd", action });
+  } catch (_error) {
+    // tab 可能还没加载 content script 或已关闭
   }
 }
 
@@ -134,18 +137,37 @@ async function getControlledTabs() {
 
 // ---------- Content script messages ----------
 
+function getTabMicSource(sender) {
+  const tabId = sender.tab?.id;
+  if (!Number.isInteger(tabId)) return null;
+  const frameId = Number.isInteger(sender.frameId) ? sender.frameId : 0;
+  return frameId === 0 ? `tab:${tabId}` : `tab:${tabId}:frame:${frameId}`;
+}
+
+function removeTabMicSources(tabId) {
+  const topFrameSource = `tab:${tabId}`;
+  const childFramePrefix = `${topFrameSource}:frame:`;
+  for (const source of [...state.micSources]) {
+    if (source === topFrameSource || source.startsWith(childFramePrefix)) {
+      removeMicSource(source);
+    }
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return;
 
   // content script 上报：当前 tab 里的 getUserMedia 已成功打开/释放
   if (msg.type === "getusermedia_started") {
-    addMicSource(`tab:${sender.tab?.id}`);
-    sendResponse({ ok: true });
+    const source = getTabMicSource(sender);
+    if (source) addMicSource(source);
+    sendResponse({ ok: !!source });
     return;
   }
   if (msg.type === "getusermedia_stopped") {
-    removeMicSource(`tab:${sender.tab?.id}`);
-    sendResponse({ ok: true });
+    const source = getTabMicSource(sender);
+    if (source) removeMicSource(source);
+    sendResponse({ ok: !!source });
     return;
   }
   if (msg.type === "get_state") {
@@ -153,6 +175,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       micActive: state.micSources.size > 0,
       sources: [...state.micSources],
       enabled: state.enabled,
+      excludedSites: [...state.excludedSites],
     });
     return;
   }
@@ -160,15 +183,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // tab 关闭清理
 chrome.tabs.onRemoved.addListener((tabId) => {
-  removeMicSource(`tab:${tabId}`);
+  removeTabMicSources(tabId);
 });
 
-// 麦克风已经在使用时，新打开或刚完成加载的页面也要立即暂停视频。
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+// 页面导航会销毁旧文档中的 MediaStreamTrack；清掉该 tab 的旧 GUM 标记，
+// 但不让 CoreAudio 的状态变化覆盖仍有效的网页来源。
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === "loading") {
+    removeTabMicSources(tabId);
+    return;
+  }
+
+  // 麦克风已经在使用时，新打开或刚完成加载的页面也要立即暂停视频。
   if (changeInfo.status !== "complete" || !state.enabled || state.micSources.size === 0) {
     return;
   }
-  chrome.tabs.sendMessage(tabId, { type: "cmd", action: "pause" }).catch(() => {});
+  if (tab) sendTabCommand(tab, isExcludedUrl(tab.url) ? "play" : "pause");
 });
 
 // ---------- Icon ----------
@@ -188,18 +218,25 @@ async function refreshIcon() {
 // ---------- Settings ----------
 
 async function loadSettings() {
-  const { enabled = true } = await chrome.storage.local.get("enabled");
+  const { enabled = true, excludedSites = [] } = await chrome.storage.local.get([
+    "enabled",
+    "excludedSites",
+  ]);
   state.enabled = enabled;
+  state.excludedSites = Array.isArray(excludedSites)
+    ? excludedSites.map(normalizeHost).filter(Boolean)
+    : [];
 }
 
 chrome.storage.onChanged.addListener((changes) => {
   if (changes.enabled) {
     state.enabled = !!changes.enabled.newValue;
-    if (!state.enabled && state.micSources.size > 0) {
-      broadcastPlay();
-    } else if (state.enabled && state.micSources.size > 0) {
-      broadcastPause();
-    }
+    syncControlledTabs();
+  }
+  if (changes.excludedSites) {
+    const value = changes.excludedSites.newValue;
+    state.excludedSites = Array.isArray(value) ? value.map(normalizeHost).filter(Boolean) : [];
+    syncControlledTabs();
   }
 });
 

@@ -20,10 +20,10 @@
   }
 
   window.MicPauseRouter = {
-    pause() {
+    pause(videos) {
       const a = pick();
       if (!a) return Promise.resolve({ paused: false, reason: "no adapter" });
-      return Promise.resolve(a.pause());
+      return Promise.resolve(a.pause(videos));
     },
     play() {
       const a = pick();

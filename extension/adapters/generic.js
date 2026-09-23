@@ -11,10 +11,11 @@
     return rect.width > 200 && rect.height > 100;
   }
 
-  function findPlayingVideos() {
-    return [...document.querySelectorAll("video")].filter((v) => {
-      return !v.paused && !v.ended && v.readyState >= 2 && isVisible(v);
-    });
+  function findPlayingVideos(candidates) {
+    const videos = candidates || [...document.querySelectorAll("video")];
+    return videos.filter((v) =>
+      !v.paused && !v.ended && v.readyState >= 2 && (candidates || isVisible(v))
+    );
   }
 
   ADAPTER.generic = {
@@ -22,8 +23,8 @@
     // 永远匹配，作为兜底
     match() { return true; },
 
-    pause() {
-      const playing = findPlayingVideos();
+    pause(candidates) {
+      const playing = findPlayingVideos(candidates);
       if (playing.length === 0) {
         return { paused: false, reason: "no playing video" };
       }

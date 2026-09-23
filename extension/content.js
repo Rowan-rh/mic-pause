@@ -9,14 +9,22 @@
 
   // ---------- getUserMedia 状态桥接 ----------
   // page-bridge.js 在网页主世界中监听 getUserMedia，再用 DOM 事件转到这里。
+  let micReportedActive = false;
   function reportMic(type) {
     try { chrome.runtime.sendMessage({ type }); } catch (_error) {}
   }
 
   document.addEventListener("micpause:microphone-started", () => {
+    micReportedActive = true;
     reportMic("getusermedia_started");
   });
   document.addEventListener("micpause:microphone-stopped", () => {
+    micReportedActive = false;
+    reportMic("getusermedia_stopped");
+  });
+  window.addEventListener("pagehide", () => {
+    if (!micReportedActive) return;
+    micReportedActive = false;
     reportMic("getusermedia_stopped");
   });
 
@@ -68,10 +76,12 @@
 
   function queuePauseCheck() {
     if (enforceTimer !== null) return;
+    // 动态视频站点会持续改 DOM。限制全页扫描频率，避免麦克风打开时
+    // 因播放器和广告节点更新造成额外布局读取；首次 pause 指令仍立即执行。
     enforceTimer = setTimeout(() => {
       enforceTimer = null;
       if (micActive) pauseVideos();
-    }, 0);
+    }, 50);
   }
 
   async function pauseVideos() {
@@ -82,7 +92,7 @@
     pauseInProgress = true;
     let result;
     try {
-      result = await Promise.resolve(window.MicPauseRouter?.pause?.());
+      result = await Promise.resolve(window.MicPauseRouter?.pause?.(candidates));
     } catch (error) {
       candidates.forEach((video) => expectedPauses.delete(video));
       return { paused: false, reason: String(error) };
@@ -120,12 +130,20 @@
   const observer = new MutationObserver(() => {
     if (micActive) queuePauseCheck();
   });
-  observer.observe(document, { childList: true, subtree: true });
+
+  function stopWatchingPageChanges() {
+    observer.disconnect();
+    if (enforceTimer !== null) {
+      clearTimeout(enforceTimer);
+      enforceTimer = null;
+    }
+  }
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (!msg || msg.type !== "cmd") return;
     if (msg.action === "pause") {
       micActive = true;
+      observer.observe(document, { childList: true, subtree: true });
       pauseVideos()
         .then(sendResponse)
         .catch((error) => sendResponse({ paused: false, reason: String(error) }));
@@ -133,6 +151,7 @@
     }
     if (msg.action === "play") {
       micActive = false;
+      stopWatchingPageChanges();
       resumeVideos()
         .then(sendResponse)
         .catch((error) => sendResponse({ resumed: false, reason: String(error) }));
