@@ -1,23 +1,20 @@
 # Git 提交与发布流程
 
-本仓库按 `develop` 开发、`master` 发布的流程协作。
+本仓库采用功能分支开发与 PR 发布。推送前必须确认远程归属；只推送到用户本人的仓库，绝不推送原仓库/上游仓库或共享基线分支。
 
 ## 开发与推送
 
-1. 开始开发前确认工作区状态并同步 `develop`，从最新的 `develop` 创建 `codex/<简短主题>` 开发分支。
-2. 在开发分支完成实现、自审和适当验证，不直接在 `develop` 或 `master` 上开发。
-3. 开发完成后，将开发分支合入 `develop` 并推送到远程 `origin/develop`。
+1. 开始前检查工作区、remote URL 和项目分支约定。以 `develop` 作为开发基线；如果配置了 `upstream`，从已确认的上游获取基线更新。
+2. 从基线创建 `codex/<简短主题>` 开发分支，在该分支完成实现、自审和适当验证。
+3. 推送前确认目标仓库属于用户本人。只推送 `codex/<简短主题>` 到个人仓库；不得推送 `develop`、`master`、默认分支或 `upstream`，也不得将开发分支合入并推送 `develop`。
+4. 远程归属或目标分支不明确时，先核实，不要尝试推送。
 
-## 发布 PR
+## Pull Request
 
-1. 创建以 `develop` 为源分支、`master` 为目标分支的 PR。创建 PR 后保持未合并，除非用户明确要求合并。
-2. PR 标题使用中文描述，并在开头加 Conventional Commits 类型标签。按变更性质选择，例如 `[feat] 支持站点例外设置`、`[fix] 修复麦克风状态检测`、`[perf] 优化页面加载速度`。
-3. 可用类型包括 `feat`、`fix`、`docs`、`style`、`refactor`、`perf`、`test`、`build`、`ci`、`chore`、`revert`。选择最符合实际改动的一项，不固定使用 `feat`。
-4. PR 正文保留改动目的、主要变更、验证结果和已知限制或注意事项，不要只写“更新”或“修复”。
-5. 创建 PR 前自审开发分支到 `master` 的完整差异；创建后核对标题、正文、源/目标分支和 CI 状态。
+1. PR 源分支为个人仓库中的 `codex/<简短主题>`；目标分支为已确认的原仓库目标分支。当前 checkout 未配置 `upstream` 时，先确认原仓库和 PR 目标，再创建 PR。
+2. PR 标题使用中文描述，并以 Conventional Commits 类型标签开头，例如 `[feat] 支持站点例外设置`、`[fix] 修复麦克风状态检测`、`[perf] 优化页面加载速度`。
+3. 类型按实际改动选择，可使用 `feat`、`fix`、`docs`、`style`、`refactor`、`perf`、`test`、`build`、`ci`、`chore`、`revert`。
+4. PR 正文说明改动目的、主要变更、验证结果和已知限制。创建前审查完整差异；创建后核对源/目标仓库与分支、标题、正文和 CI 状态。
+5. 创建 PR 不代表同意合并；除非用户明确要求，不要合入原仓库的目标分支。
 
-方括号类型标签是本仓库的 PR 标题格式。提交消息使用 Conventional Commits 格式 `type(scope): description`，不加方括号。
-
-## 分支初始化
-
-如果仓库尚无 `develop` 或 `master`，先检查远程分支和项目约定，再决定如何初始化；不要覆盖已有分支。若项目采用其他分支模型，遵循该项目的贡献指南。
+方括号标签用于 PR 标题。提交消息采用 Conventional Commits 格式 `type(scope): description`，不加方括号。
