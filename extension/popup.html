@@ -16,7 +16,8 @@
       font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
       background: var(--bg);
       color: var(--fg);
-      width: 280px;
+      width: 320px;
+      box-sizing: border-box;
       margin: 0;
       padding: 16px;
       font-size: 13px;
@@ -79,6 +80,93 @@
       border-radius: 6px;
       word-break: break-all;
     }
+    .section {
+      padding-top: 14px;
+    }
+    .section-title {
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .section-help {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+      margin: 0 0 10px;
+    }
+    .site-row, .site-form, .site-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .site-row {
+      justify-content: space-between;
+      padding: 8px;
+      background: #2c2c2e;
+      border-radius: 6px;
+      margin-bottom: 8px;
+    }
+    .current-host {
+      color: var(--muted);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    input, button {
+      font: inherit;
+    }
+    input {
+      min-width: 0;
+      flex: 1;
+      padding: 7px 8px;
+      color: var(--fg);
+      background: #2c2c2e;
+      border: 1px solid #48484a;
+      border-radius: 6px;
+      outline: none;
+    }
+    input:focus { border-color: #0a84ff; }
+    button {
+      color: #fff;
+      background: #3a3a3c;
+      border: 0;
+      border-radius: 6px;
+      padding: 7px 9px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button:hover:not(:disabled) { background: #515153; }
+    button:disabled { opacity: 0.45; cursor: default; }
+    .site-form button { background: #0a84ff; }
+    .site-form button:hover:not(:disabled) { background: #369cff; }
+    .site-list {
+      list-style: none;
+      padding: 0;
+      margin: 8px 0 0;
+      max-height: 116px;
+      overflow-y: auto;
+    }
+    .site-item {
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .site-item:last-child { border-bottom: 0; }
+    .site-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .remove-site {
+      padding: 3px 7px;
+      color: var(--muted);
+    }
+    .site-message {
+      min-height: 14px;
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 5px;
+    }
   </style>
 </head>
 <body>
@@ -93,6 +181,21 @@
   </div>
 
   <div class="status" id="status">连接 native host...</div>
+
+  <section class="section" aria-labelledby="sites-title">
+    <div class="section-title" id="sites-title">例外网站</div>
+    <p class="section-help">麦克风打开时，这些网站的视频会继续播放。</p>
+    <div class="site-row">
+      <span id="current-host" class="current-host">当前网站</span>
+      <button id="toggle-current-site" type="button" disabled>加入例外</button>
+    </div>
+    <form id="add-site-form" class="site-form">
+      <input id="site-input" type="text" placeholder="输入域名，例如 example.com" autocomplete="off" />
+      <button type="submit">添加</button>
+    </form>
+    <ul id="site-list" class="site-list"></ul>
+    <div id="site-message" class="site-message" aria-live="polite"></div>
+  </section>
 
   <script src="popup.js"></script>
 </body>
