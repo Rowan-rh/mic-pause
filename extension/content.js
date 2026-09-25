@@ -173,7 +173,13 @@
   observer.observe(document, { childList: true, subtree: true });
 
   function onMessage(msg, _sender, sendResponse) {
-    if (disposed || !msg || msg.type !== "cmd") return;
+    if (disposed || !msg) return;
+    // background 用来确认本页面的 content script 仍在工作。
+    if (msg.type === "ping") {
+      sendResponse({ ok: true });
+      return;
+    }
+    if (msg.type !== "cmd") return;
     if (msg.action === "pause") {
       micActive = true;
       pauseVideos()

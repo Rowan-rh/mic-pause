@@ -194,6 +194,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return;
   }
+  if (msg.type === "ensure_content_scripts") {
+    ensureContentScripts()
+      .then(sendResponse)
+      .catch((e) => sendResponse({ error: String(e?.message || e) }));
+    return true; // 异步响应
+  }
   if (msg.type === "get_state") {
     sendResponse({
       micActive: state.micSources.size > 0,
@@ -214,27 +220,41 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // ---------- Existing tabs ----------
 
-// 安装、更新或重载扩展后，已打开的页面里没有 content script，需要补注入，
-// 否则用户不刷新页面就不会生效。
-async function injectIntoExistingTabs() {
-  const manifest = chrome.runtime.getManifest();
-  const tabs = await getControlledTabs();
-  await Promise.allSettled(tabs.map(async (tab) => {
-    for (const script of manifest.content_scripts || []) {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id, allFrames: !!script.all_frames },
-        files: script.js,
-        world: script.world || "ISOLATED",
-      });
-    }
-  }));
+// 安装、更新、重载或重新启用扩展后，已打开页面里的 content script 缺失或已失效，
+// 用户不刷新页面就不会生效。这里先 ping，只给没有响应的页面补注入：
+// 仍在工作的页面不重复注入，避免丢失"哪些视频由插件暂停"的状态。
+const PING_TIMEOUT_MS = 1000;
+
+function pingTab(tabId) {
+  const ping = chrome.tabs.sendMessage(tabId, { type: "ping" }).then((r) => !!r?.ok);
+  const timeout = new Promise((resolve) => setTimeout(() => resolve(false), PING_TIMEOUT_MS));
+  return Promise.race([ping, timeout]).catch(() => false);
 }
 
-chrome.runtime.onInstalled.addListener(() => {
-  injectIntoExistingTabs().catch((e) => {
-    console.warn("[mic-pause] inject into existing tabs failed", e);
-  });
-});
+async function injectIntoTab(tabId) {
+  const manifest = chrome.runtime.getManifest();
+  for (const script of manifest.content_scripts || []) {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: !!script.all_frames },
+      files: script.js,
+      world: script.world || "ISOLATED",
+    });
+  }
+}
+
+async function ensureContentScripts() {
+  // 被内存节省模式丢弃的 tab 重新激活时会重新加载，届时会自然注入。
+  const tabs = (await getControlledTabs()).filter((tab) => !tab.discarded);
+  const results = await Promise.allSettled(tabs.map(async (tab) => {
+    if (await pingTab(tab.id)) return false;
+    await injectIntoTab(tab.id);
+    return true;
+  }));
+  const injected = results.filter((r) => r.status === "fulfilled" && r.value).length;
+  const failed = results.filter((r) => r.status === "rejected").length;
+  // 新注入的 content script 启动时会自己查询 get_state，麦克风在用时会立即暂停。
+  return { total: tabs.length, injected, failed };
+}
 
 // 浏览器启动时唤醒 service worker 并连接 native host（boot 代码会在唤醒时执行）。
 chrome.runtime.onStartup.addListener(() => {});
@@ -271,4 +291,8 @@ chrome.storage.onChanged.addListener((changes) => {
   await loadSettings();
   connectNative();
   refreshIcon();
+  // 每次 service worker 启动（含安装、更新、重载、重新启用）都检查一遍已打开的页面。
+  ensureContentScripts().catch((e) => {
+    console.warn("[mic-pause] ensure content scripts failed", e);
+  });
 })();

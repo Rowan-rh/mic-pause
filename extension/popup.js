@@ -14,6 +14,22 @@
     setToggle(next);
   });
 
+  // 手动兜底：给已打开但没有被接管的页面补注入脚本
+  const ensureBtn = document.getElementById("ensure");
+  ensureBtn.addEventListener("click", () => {
+    ensureBtn.disabled = true;
+    ensureBtn.textContent = "处理中…";
+    chrome.runtime.sendMessage({ type: "ensure_content_scripts" }, (resp) => {
+      ensureBtn.disabled = false;
+      if (chrome.runtime.lastError || !resp || resp.error) {
+        ensureBtn.textContent = "失败，重试";
+        return;
+      }
+      ensureBtn.textContent = resp.injected > 0 ? `已接管 ${resp.injected} 个` : "均已接管";
+      setTimeout(() => { ensureBtn.textContent = "接管"; }, 2500);
+    });
+  });
+
   // 拉取当前状态
   function refresh() {
     chrome.runtime.sendMessage({ type: "get_state" }, (resp) => {

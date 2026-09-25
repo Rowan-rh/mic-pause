@@ -89,7 +89,9 @@ cd native-host
 - 编译 `mic-monitor.swift` 到 `native-host/mic-monitor`
 - 写入 manifest 到 `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.micpause.host.json`
 
-然后在 `chrome://extensions` 点击扩展的刷新按钮。已打开的网页会自动补注入脚本，无需逐个刷新。
+然后在 `chrome://extensions` 点击扩展的刷新按钮。
+
+扩展安装、更新、刷新或重新启用后，会自动检查已打开的网页，给没有被接管的页面补注入脚本，无需逐个刷新页面。万一某个页面的视频仍没有被暂停，点击扩展图标里的 **"接管"** 按钮手动补注入即可；已经正常工作的页面不会被重复注入，也不会丢失暂停状态。
 
 注意事项：
 
@@ -116,7 +118,7 @@ vim ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.micpau
 
 拉取新代码后，按改动的部分操作：
 
-- **只改了 `extension/`**：在 `chrome://extensions` 点击扩展的刷新按钮即可，已打开的网页会自动生效。
+- **只改了 `extension/`**：在 `chrome://extensions` 点击扩展的刷新按钮即可，已打开的网页会自动接管（必要时点扩展图标里的"接管"按钮）。
 - **改了 `native-host/mic-monitor.swift`**：需要重新编译，然后刷新扩展让它重新启动 native host。项目目录和扩展 ID 没变时不需要重新注册：
 
   ```bash
