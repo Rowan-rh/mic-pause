@@ -11,12 +11,30 @@
 - **浏览器页面全覆盖**：普通 HTTP/HTTPS 页面上的 `<video>` 都会处理，YouTube、Bilibili、Vimeo、Netflix 有专用适配器
 - **适配器架构**：每个站点单独写 selector / player API，便于按需扩展
 
+## 两个组件分别负责什么
+
+项目由两部分组成，检测范围不同：
+
+| 组件 | 位置 | 能检测到的麦克风占用 |
+|---|---|---|
+| 浏览器扩展（JS） | `extension/` | 仅浏览器网页内的，如 Google Meet 网页版、网页录音 |
+| native host（Swift） | `native-host/mic-monitor` | 整台 Mac 的，包括 Zoom、飞书、腾讯会议、QQ、QuickTime 等桌面应用 |
+
+浏览器扩展无法直接读取系统级麦克风状态，所以由 Swift 编写的 `mic-monitor` 通过 CoreAudio 查询，再经 Chrome native messaging 通知扩展。**只装扩展、不装 native host 时，桌面应用开麦不会暂停视频。**
+
+native host 的检测方式：
+
+- 纯输入设备（内置麦克风、USB 麦克风）：读取设备的 `kAudioDevicePropertyDeviceIsRunningSomewhere`。
+- 同时带输入和输出的设备（USB / 蓝牙耳麦等）：设备级状态不区分输入输出，只播放声音也会变成"运行中"。这类设备改为检查 CoreAudio 进程对象的 `kAudioProcessPropertyIsRunningInput`，即是否真有进程在录音；系统不支持时回退到设备级判断。
+
+点击扩展图标可以确认 native host 是否已连接：若显示"⚠ 未连接 native host（…）"，括号里是 Chrome 给出的原因。
+
 ## 工作流
 
 ```
 麦克风开始使用 ──┬──► Chrome (getUserMedia 劫持) ──┐
                 │                                  ▼
-                └──► CoreAudio (kAudioDevicePropertyDeviceIsRunningSomewhere)
+                └──► native host / CoreAudio（设备运行状态 + 进程输入状态）
                                                        │
                                                        ▼
                           background.js 聚合 micSources 集合
@@ -93,6 +111,20 @@ vim ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.micpau
 ### 3. 重启 Chrome（如果 native host 仍未连接）
 
 让 Chrome 重新加载 native messaging 配置。
+
+## 更新
+
+拉取新代码后，按改动的部分操作：
+
+- **只改了 `extension/`**：在 `chrome://extensions` 点击扩展的刷新按钮即可，已打开的网页会自动生效。
+- **改了 `native-host/mic-monitor.swift`**：需要重新编译，然后刷新扩展让它重新启动 native host。项目目录和扩展 ID 没变时不需要重新注册：
+
+  ```bash
+  cd native-host
+  ./build.sh
+  ```
+
+- **移动了项目目录或扩展 ID 变了**：重跑 `./install.sh <扩展 ID>`。
 
 ## 验证
 
