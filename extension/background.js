@@ -2,20 +2,33 @@
 // 职责：
 //   1. 连接 native messaging host，监听系统级麦克风占用事件
 //   2. 接收并转发 getUserMedia 拦截事件（来自 content script）
-//   3. 汇总"麦克风是否在用"的全局状态，向所有受控 tab 广播 pause/play
+//   3. 汇总"麦克风是否在用"的全局状态，向所有受控 tab 同步 pause/play
 //   4. 处理 popup 设置同步
 
 const NATIVE_HOST_NAME = "com.micpause.host";
+const TAB_URL_PATTERNS = ["http://*/*", "https://*/*"];
+// 单个 tab 迟迟不响应时不能阻塞其它 tab 的同步。
+const SEND_TIMEOUT_MS = 3000;
 
 const state = {
-  // 麦克风占用来源计数（用于多源场景：Zoom 在用 + 浏览器录音同时进行）
+  // 麦克风占用来源（用于多源场景：Zoom 在用 + 浏览器录音同时进行）
+  // 网页来源按 frame 区分：tab:<tabId>:<frameId>
   micSources: new Set(),
   // 设置
   enabled: true,
   // native port
   port: null,
+  nativeConnected: false,
+  nativeError: "",
   // 重连 backoff
   reconnectTimer: null,
+  // tab 同步：同一时刻只跑一轮，期间状态变化则在结束后按最新状态再跑一轮
+  syncRunning: false,
+  syncPending: false,
+  // 上一次同步给 tab 的状态，只有状态翻转时才广播
+  lastActive: false,
+  // service worker 重启后 tab 里可能还留着上一轮的暂停状态，拿到首个确定状态后强制同步一次
+  initialSynced: false,
 };
 
 // ---------- Native messaging ----------
@@ -23,18 +36,26 @@ const state = {
 function connectNative() {
   if (state.port) return;
   try {
-    state.port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
-    state.port.onMessage.addListener(onNativeMessage);
-    state.port.onDisconnect.addListener(() => {
+    const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+    state.port = port;
+    port.onMessage.addListener(onNativeMessage);
+    port.onDisconnect.addListener(() => {
       const err = chrome.runtime.lastError;
       console.warn("[mic-pause] native host disconnected", err?.message);
-      state.port = null;
+      if (state.port === port) state.port = null;
+      state.nativeConnected = false;
+      state.nativeError = err?.message || "native host 已断开";
+      // native 断开后不再有人报告 mic_stopped，避免 system 来源残留导致视频一直暂停。
+      state.micSources.delete("system");
+      onMicSourcesChanged();
       scheduleReconnect();
     });
-    console.log("[mic-pause] native host connected");
+    console.log("[mic-pause] native host connecting");
   } catch (e) {
     console.error("[mic-pause] connectNative failed", e);
     state.port = null;
+    state.nativeConnected = false;
+    state.nativeError = String(e?.message || e);
     scheduleReconnect();
   }
 }
@@ -49,11 +70,14 @@ function scheduleReconnect() {
 
 function onNativeMessage(msg) {
   if (!msg || typeof msg !== "object") return;
+  state.nativeConnected = true;
+  state.nativeError = "";
   switch (msg.type) {
     case "init":
       console.log("[mic-pause] native init, running=", msg.running);
-      if (msg.running) addMicSource("system");
-      else removeMicSource("system");
+      if (msg.running) state.micSources.add("system");
+      else state.micSources.delete("system");
+      onMicSourcesChanged();
       break;
     case "mic_started":
       addMicSource("system");
@@ -76,57 +100,80 @@ function removeSystemSourceAndStaleTabSources() {
   for (const source of state.micSources) {
     if (source.startsWith("tab:")) state.micSources.delete(source);
   }
-  if (state.micSources.size === 0 && state.enabled) broadcastPlay();
-  refreshIcon();
+  onMicSourcesChanged();
 }
 
 // ---------- Mic source aggregation ----------
 
+function isMicActive() {
+  return state.micSources.size > 0 && state.enabled;
+}
+
 function addMicSource(src) {
   if (state.micSources.has(src)) return;
-  const wasInactive = state.micSources.size === 0;
   state.micSources.add(src);
-  if (wasInactive && state.enabled) broadcastPause();
-  refreshIcon();
+  onMicSourcesChanged();
 }
 
 function removeMicSource(src) {
-  if (!state.micSources.has(src)) return;
-  state.micSources.delete(src);
-  if (state.micSources.size === 0) {
-    if (state.enabled) broadcastPlay();
+  if (!state.micSources.delete(src)) return;
+  onMicSourcesChanged();
+}
+
+function removeTabSources(tabId) {
+  const prefix = `tab:${tabId}:`;
+  let changed = false;
+  for (const source of state.micSources) {
+    if (source.startsWith(prefix)) {
+      state.micSources.delete(source);
+      changed = true;
+    }
+  }
+  if (changed) onMicSourcesChanged();
+}
+
+function onMicSourcesChanged() {
+  if (!state.initialSynced || isMicActive() !== state.lastActive) {
+    state.initialSynced = true;
+    syncTabs();
   }
   refreshIcon();
 }
 
-// ---------- Tab broadcast ----------
+// ---------- Tab sync ----------
 
-async function broadcastPause() {
-  // 受控站点列表
-  const controlled = await getControlledTabs();
-  for (const tab of controlled) {
-    // 跳过已经在播放的就跳过：content script 内部判断
-    try {
-      await chrome.tabs.sendMessage(tab.id, { type: "cmd", action: "pause" });
-    } catch (e) {
-      // tab 可能没加载 content script 或已关闭
-    }
+// 始终按"当前"状态同步，而不是排队执行历史指令：麦克风短暂开关时，
+// 不会出现 play 先到、pause 后到导致视频一直被暂停的情况。
+async function syncTabs() {
+  if (state.syncRunning) {
+    state.syncPending = true;
+    return;
+  }
+  state.syncRunning = true;
+  try {
+    do {
+      state.syncPending = false;
+      state.lastActive = isMicActive();
+      const action = state.lastActive ? "pause" : "play";
+      const tabs = await getControlledTabs();
+      await Promise.allSettled(tabs.map((tab) => sendCommand(tab.id, action)));
+    } while (state.syncPending);
+  } finally {
+    state.syncRunning = false;
   }
 }
 
-async function broadcastPlay() {
-  const controlled = await getControlledTabs();
-  for (const tab of controlled) {
-    try {
-      await chrome.tabs.sendMessage(tab.id, { type: "cmd", action: "play" });
-    } catch (e) {}
-  }
+function sendCommand(tabId, action) {
+  const send = chrome.tabs.sendMessage(tabId, { type: "cmd", action });
+  const timeout = new Promise((resolve) => setTimeout(resolve, SEND_TIMEOUT_MS));
+  // tab 可能没加载 content script 或已关闭
+  return Promise.race([send, timeout]).catch(() => {});
 }
 
 async function getControlledTabs() {
   try {
     // 不再限制 audible：静音视频、刚开始加载的视频也应被暂停。
-    return await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+    return await chrome.tabs.query({ url: TAB_URL_PATTERNS });
   } catch (e) {
     return [];
   }
@@ -137,22 +184,24 @@ async function getControlledTabs() {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return;
 
-  // content script 上报：当前 tab 里的 getUserMedia 已成功打开/释放
-  if (msg.type === "getusermedia_started") {
-    addMicSource(`tab:${sender.tab?.id}`);
-    sendResponse({ ok: true });
-    return;
-  }
-  if (msg.type === "getusermedia_stopped") {
-    removeMicSource(`tab:${sender.tab?.id}`);
+  // content script 上报：当前 frame 里的 getUserMedia 已成功打开/释放
+  if (msg.type === "getusermedia_started" || msg.type === "getusermedia_stopped") {
+    if (sender.tab?.id !== undefined) {
+      const source = `tab:${sender.tab.id}:${sender.frameId ?? 0}`;
+      if (msg.type === "getusermedia_started") addMicSource(source);
+      else removeMicSource(source);
+    }
     sendResponse({ ok: true });
     return;
   }
   if (msg.type === "get_state") {
     sendResponse({
       micActive: state.micSources.size > 0,
+      shouldPause: isMicActive(),
       sources: [...state.micSources],
       enabled: state.enabled,
+      nativeConnected: state.nativeConnected,
+      nativeError: state.nativeError,
     });
     return;
   }
@@ -160,23 +209,40 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // tab 关闭清理
 chrome.tabs.onRemoved.addListener((tabId) => {
-  removeMicSource(`tab:${tabId}`);
+  removeTabSources(tabId);
 });
 
-// 麦克风已经在使用时，新打开或刚完成加载的页面也要立即暂停视频。
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status !== "complete" || !state.enabled || state.micSources.size === 0) {
-    return;
-  }
-  chrome.tabs.sendMessage(tabId, { type: "cmd", action: "pause" }).catch(() => {});
+// ---------- Existing tabs ----------
+
+// 安装、更新或重载扩展后，已打开的页面里没有 content script，需要补注入，
+// 否则用户不刷新页面就不会生效。
+async function injectIntoExistingTabs() {
+  const manifest = chrome.runtime.getManifest();
+  const tabs = await getControlledTabs();
+  await Promise.allSettled(tabs.map(async (tab) => {
+    for (const script of manifest.content_scripts || []) {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: !!script.all_frames },
+        files: script.js,
+        world: script.world || "ISOLATED",
+      });
+    }
+  }));
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  injectIntoExistingTabs().catch((e) => {
+    console.warn("[mic-pause] inject into existing tabs failed", e);
+  });
 });
+
+// 浏览器启动时唤醒 service worker 并连接 native host（boot 代码会在唤醒时执行）。
+chrome.runtime.onStartup.addListener(() => {});
 
 // ---------- Icon ----------
 
 async function refreshIcon() {
-  const active = state.micSources.size > 0 && state.enabled;
-  // 简单的占位：Chrome 暂未提供程序化修改 action 图标的便利 API（除非用 declarativeNetRequest 之类的）
-  // 实际项目里可以用 chrome.action.setIcon / setBadgeText
+  const active = isMicActive();
   try {
     await chrome.action.setBadgeText({ text: active ? "•" : "" });
     await chrome.action.setBadgeBackgroundColor({
@@ -194,12 +260,8 @@ async function loadSettings() {
 
 chrome.storage.onChanged.addListener((changes) => {
   if (changes.enabled) {
-    state.enabled = !!changes.enabled.newValue;
-    if (!state.enabled && state.micSources.size > 0) {
-      broadcastPlay();
-    } else if (state.enabled && state.micSources.size > 0) {
-      broadcastPause();
-    }
+    state.enabled = changes.enabled.newValue !== false;
+    onMicSourcesChanged();
   }
 });
 

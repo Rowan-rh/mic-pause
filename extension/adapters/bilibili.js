@@ -1,46 +1,35 @@
 // adapters/bilibili.js
-// B站适配：B 站把 video 元素放在 bpx-player 容器里，有时被 Shadow DOM 包裹。
-// 这里直接走 document 范围的 video 元素，加上 B 站特定 class 兜底。
+// B站适配：B 站把 video 元素放在 bpx-player 容器里。
+// 优先选播放器容器内的 video，其余候选视频由 content.js 兜底暂停。
 
 (function () {
   const ADAPTER = (window.MicPauseAdapter = window.MicPauseAdapter || {});
 
-  function findVideo() {
-    return (
-      document.querySelector("bpx-player-video video") ||
-      document.querySelector(".bpx-player-video-wrap video") ||
-      document.querySelector("video[src], video") ||
-      null
-    );
-  }
+  const PLAYER_VIDEO = ".bpx-player-video-wrap video, .bpx-player-video-area video";
 
-  // B 站的 player JS 全局对象
-  function getBiliPlayer() {
-    return window.player || window.__BiliPlayer__ || null;
+  function findVideo(candidates) {
+    return (
+      candidates.find((v) => v.matches(PLAYER_VIDEO)) ||
+      candidates[0] ||
+      document.querySelector(PLAYER_VIDEO) ||
+      document.querySelector("video")
+    );
   }
 
   ADAPTER.bilibili = {
     name: "bilibili",
     match() {
-      return location.hostname.endsWith("bilibili.com");
+      return /(^|\.)bilibili\.com$/.test(location.hostname);
     },
 
-    pause() {
-      const v = findVideo();
+    pause(candidates = []) {
+      const v = findVideo(candidates);
       if (!v) return { paused: false, reason: "no video" };
-      if (v.paused || v.ended || v.readyState < 2) {
+      if (v.paused || v.ended) {
         return { paused: false, reason: "not playing" };
       }
-      const elementId = "bili-video";
       v.pause();
-      return { paused: true, elementId };
-    },
-
-    play() {
-      const v = findVideo();
-      if (!v) return { resumed: false };
-      if (v.paused) v.play().catch(() => {});
-      return { resumed: true };
+      return { paused: true, elementId: "bili-video" };
     },
   };
 })();

@@ -15,13 +15,16 @@
   });
 
   // 拉取当前状态
-  chrome.runtime.sendMessage({ type: "get_state" }, (resp) => {
-    if (!resp) {
-      status.textContent = "未连接到 background。";
-      return;
-    }
-    setStatus(resp);
-  });
+  function refresh() {
+    chrome.runtime.sendMessage({ type: "get_state" }, (resp) => {
+      if (chrome.runtime.lastError || !resp) {
+        status.textContent = "未连接到 background。";
+        return;
+      }
+      setStatus(resp);
+    });
+  }
+  refresh();
 
   // 监听 storage 变化，保持 popup 同步
   chrome.storage.onChanged.addListener((changes) => {
@@ -31,11 +34,7 @@
   });
 
   // 简单轮询状态（service worker 不会主动 push 到 popup）
-  setInterval(() => {
-    chrome.runtime.sendMessage({ type: "get_state" }, (resp) => {
-      if (resp) setStatus(resp);
-    });
-  }, 1000);
+  setInterval(refresh, 1000);
 
   function setToggle(on) {
     toggle.classList.toggle("on", on);
@@ -47,10 +46,13 @@
       status.textContent = "已关闭 — 不会自动暂停";
       return;
     }
-    if (s.micActive) {
-      status.textContent = `麦克风使用中：${s.sources.join(", ")}`;
-    } else {
-      status.textContent = "麦克风空闲";
-    }
+    const mic = s.micActive
+      ? `麦克风使用中：${s.sources.join(", ")}`
+      : "麦克风空闲";
+    // native host 没连上时只能检测到浏览器内的麦克风，桌面应用不会触发暂停。
+    const native = s.nativeConnected
+      ? ""
+      : `\n⚠ 未连接 native host，桌面应用的麦克风无法检测${s.nativeError ? `（${s.nativeError}）` : ""}`;
+    status.textContent = mic + native;
   }
 })();
