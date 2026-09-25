@@ -1,16 +1,15 @@
 // adapters/vimeo.js
-// Vimeo 适配：优先用 Vimeo Player API（@vimeo/player 或 window.Vimeo.Player），
-// 兜底 <video>。
+// Vimeo 适配：有 Vimeo Player API（window.Vimeo.Player）时顺带通知播放器暂停，
+// 同时直接暂停 <video>。
 
 (function () {
   const ADAPTER = (window.MicPauseAdapter = window.MicPauseAdapter || {});
 
-  function findVideo() {
-    return document.querySelector("video");
+  function findVideo(candidates) {
+    return candidates[0] || document.querySelector("video");
   }
 
   function findVimeoPlayer() {
-    // Vimeo Player JS 会在 player 元素上挂 __vimeoPlayer 或通过事件
     if (window.Vimeo?.Player) {
       const iframe = document.querySelector("iframe[src*='player.vimeo.com']");
       if (iframe) {
@@ -23,34 +22,19 @@
   ADAPTER.vimeo = {
     name: "vimeo",
     match() {
-      return location.hostname.endsWith("vimeo.com");
+      return /(^|\.)vimeo\.com$/.test(location.hostname);
     },
 
-    async pause() {
-      const v = findVideo();
+    pause(candidates = []) {
+      const v = findVideo(candidates);
       if (!v) return { paused: false, reason: "no video" };
-      if (v.paused || v.ended || v.readyState < 2) {
+      if (v.paused || v.ended) {
         return { paused: false, reason: "not playing" };
       }
-      const player = findVimeoPlayer();
-      if (player) {
-        try { await player.pause(); } catch (e) {}
-      }
+      // 不等待 Player API：播放器未就绪时它的 Promise 可能一直不返回。
+      findVimeoPlayer()?.pause().catch(() => {});
       v.pause();
       return { paused: true, elementId: "vimeo-video" };
-    },
-
-    async play() {
-      const v = findVideo();
-      if (!v) return { resumed: false };
-      if (!v.paused) return { resumed: false };
-      const player = findVimeoPlayer();
-      if (player) {
-        try { await player.play(); } catch (e) {}
-      } else {
-        v.play().catch(() => {});
-      }
-      return { resumed: true };
     },
   };
 })();

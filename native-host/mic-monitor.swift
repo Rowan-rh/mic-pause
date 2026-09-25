@@ -6,9 +6,12 @@
 //   Chrome → host: [uint32 little-endian length][JSON bytes]
 //   host → Chrome: [uint32 little-endian length][JSON bytes]
 //
-// 检测原理：监听默认输入设备的 kAudioDevicePropertyDeviceIsRunningSomewhere
-// 属性变化（输入作用域）。只要任何 app（Zoom/飞书/QQ/网页）开始/结束使用麦克风，
-// CoreAudio 都会触发回调。
+// 检测原理：
+//   - 纯输入设备（内置麦克风、USB 麦克风）：kAudioDevicePropertyDeviceIsRunningSomewhere。
+//   - 同时带输入和输出通道的设备（USB/蓝牙耳麦等）：该属性是设备级的、不区分 scope，
+//     只播放声音也会变成 1，会误判为"麦克风在用"。
+//     这类设备改用 CoreAudio 进程对象的 kAudioProcessPropertyIsRunningInput 判断；
+//     系统不支持进程对象时回退到设备级判断，保持原有行为。
 
 import Foundation
 import CoreAudio
@@ -82,15 +85,23 @@ func getInputDevices() -> [AudioDeviceID] {
 }
 
 func hasInputChannels(_ deviceID: AudioDeviceID) -> Bool {
+    channelCount(deviceID, scope: kAudioObjectPropertyScopeInput) > 0
+}
+
+func hasOutputChannels(_ deviceID: AudioDeviceID) -> Bool {
+    channelCount(deviceID, scope: kAudioObjectPropertyScopeOutput) > 0
+}
+
+func channelCount(_ deviceID: AudioDeviceID, scope: AudioObjectPropertyScope) -> UInt32 {
     var size: UInt32 = 0
     var addr = AudioObjectPropertyAddress(
         mSelector: kAudioDevicePropertyStreamConfiguration,
-        mScope: kAudioObjectPropertyScopeInput,
+        mScope: scope,
         mElement: kMasterElement
     )
     guard AudioObjectGetPropertyDataSize(deviceID, &addr, 0, nil, &size) == noErr,
           size >= UInt32(MemoryLayout<AudioBufferList>.size) else {
-        return false
+        return 0
     }
 
     var data = Data(count: Int(size))
@@ -98,10 +109,10 @@ func hasInputChannels(_ deviceID: AudioDeviceID) -> Bool {
         guard let baseAddress = raw.baseAddress else { return -1 }
         return AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &size, baseAddress)
     }
-    guard status == noErr else { return false }
+    guard status == noErr else { return 0 }
 
-    return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
-        guard let baseAddress = raw.baseAddress else { return false }
+    return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> UInt32 in
+        guard let baseAddress = raw.baseAddress else { return 0 }
         let list = UnsafeMutableAudioBufferListPointer(
             UnsafeMutablePointer(mutating: baseAddress.assumingMemoryBound(to: AudioBufferList.self))
         )
@@ -109,7 +120,7 @@ func hasInputChannels(_ deviceID: AudioDeviceID) -> Bool {
         for index in 0..<list.count {
             channels += list[index].mNumberChannels
         }
-        return channels > 0
+        return channels
     }
 }
 
@@ -121,8 +132,54 @@ func isInputRunning(_ deviceID: AudioDeviceID) -> Bool {
     return status == noErr && running != 0
 }
 
+// 返回 nil 表示当前系统不支持进程对象（旧版 macOS）或查询失败。
+func isAnyProcessRunningInput() -> Bool? {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyProcessObjectList,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kMasterElement
+    )
+    let systemObject = AudioObjectID(kAudioObjectSystemObject)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(systemObject, &addr, 0, nil, &size) == noErr else {
+        return nil
+    }
+    let count = Int(size) / MemoryLayout<AudioObjectID>.stride
+    guard count > 0 else { return nil }
+    var processes = [AudioObjectID](repeating: kAudioObjectUnknown, count: count)
+    let status = processes.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) -> OSStatus in
+        guard let baseAddress = raw.baseAddress else { return -1 }
+        return AudioObjectGetPropertyData(systemObject, &addr, 0, nil, &size, baseAddress)
+    }
+    guard status == noErr else { return nil }
+
+    var anyQueried = false
+    for process in processes.prefix(Int(size) / MemoryLayout<AudioObjectID>.stride) {
+        var running: UInt32 = 0
+        var runningSize = UInt32(MemoryLayout<UInt32>.size)
+        var runningAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyIsRunningInput,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kMasterElement
+        )
+        guard AudioObjectGetPropertyData(process, &runningAddr, 0, nil, &runningSize, &running) == noErr else {
+            continue
+        }
+        anyQueried = true
+        if running != 0 { return true }
+    }
+    return anyQueried ? false : nil
+}
+
 func isAnyInputRunning() -> Bool {
-    getInputDevices().contains(where: isInputRunning)
+    let devices = getInputDevices()
+    let inputOnly = devices.filter { !hasOutputChannels($0) }
+    let mixed = devices.filter(hasOutputChannels)
+
+    if inputOnly.contains(where: isInputRunning) { return true }
+    if mixed.isEmpty { return false }
+    if let processRunning = isAnyProcessRunningInput() { return processRunning }
+    return mixed.contains(where: isInputRunning)
 }
 
 let stateLock = NSLock()
@@ -183,9 +240,11 @@ func refreshDeviceListeners() {
     updateRunning(isAnyInputRunning())
 }
 
-// 初始状态
-refreshDeviceListeners()
+// 初始状态：先记录当前状态再安装监听，避免在 init 之前多发一条 mic_started。
+stateLock.lock()
 lastRunning = isAnyInputRunning()
+stateLock.unlock()
+refreshDeviceListeners()
 sendMessage([
     "type": "init",
     "running": currentRunning(),

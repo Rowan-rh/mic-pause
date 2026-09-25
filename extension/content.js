@@ -7,39 +7,58 @@
 (function () {
   "use strict";
 
+  // 扩展重载 / 补注入时可能已有旧实例，先让旧实例停止工作。
+  try { window.__micPauseContent?.dispose?.(); } catch (_error) {}
+
+  // 扩展被重载或卸载后，旧 content script 的 chrome.runtime 会失效。
+  function isExtensionAlive() {
+    try { return !!chrome.runtime?.id; } catch (_error) { return false; }
+  }
+
   // ---------- getUserMedia 状态桥接 ----------
   // page-bridge.js 在网页主世界中监听 getUserMedia，再用 DOM 事件转到这里。
   let micReportedActive = false;
   function reportMic(type) {
-    try { chrome.runtime.sendMessage({ type }); } catch (_error) {}
+    if (!isExtensionAlive()) return;
+    try { chrome.runtime.sendMessage({ type }).catch(() => {}); } catch (_error) {}
   }
 
-  document.addEventListener("micpause:microphone-started", () => {
+  const onMicStarted = () => {
     micReportedActive = true;
     reportMic("getusermedia_started");
-  });
-  document.addEventListener("micpause:microphone-stopped", () => {
+  };
+  const onMicStopped = () => {
     micReportedActive = false;
     reportMic("getusermedia_stopped");
-  });
-  window.addEventListener("pagehide", () => {
+  };
+  const onPageHide = () => {
     if (!micReportedActive) return;
     micReportedActive = false;
     reportMic("getusermedia_stopped");
-  });
+  };
+  document.addEventListener("micpause:microphone-started", onMicStarted);
+  document.addEventListener("micpause:microphone-stopped", onMicStopped);
+  window.addEventListener("pagehide", onPageHide);
 
   // ---------- 后台指令 ----------
   const pausedByUs = new Set();
   // HTMLMediaElement 的 pause 事件是异步派发的，不能只靠 pauseInProgress
   // 判断，否则事件到达时会误删 pausedByUs。
   const expectedPauses = new Set();
-  const videoHandlers = new WeakMap();
+  const watchedVideos = new Map();
   let micActive = false;
   let pauseInProgress = false;
   let enforceTimer = null;
+  let disposed = false;
 
   function isPlaying(video) {
-    return video && !video.paused && !video.ended && video.readyState >= 2;
+    // 不要求 readyState：正在缓冲的视频缓冲完会继续播放，同样需要暂停。
+    return video && !video.paused && !video.ended;
+  }
+
+  // 网页会议的远端/本地画面（srcObject 是 MediaStream）不是"视频内容"，不能暂停。
+  function isLiveStream(video) {
+    return typeof MediaStream !== "undefined" && video.srcObject instanceof MediaStream;
   }
 
   function isVisible(video) {
@@ -48,8 +67,13 @@
     return rect.width > 200 && rect.height > 100;
   }
 
+  // 尺寸较小但有声音的视频（小窗播放器、音频型视频）也属于正在播放的内容。
+  function isAudible(video) {
+    return !video.muted && video.volume > 0;
+  }
+
   function watchVideo(video) {
-    if (videoHandlers.has(video)) return;
+    if (watchedVideos.has(video)) return;
 
     const onPause = () => {
       // 这是我们发出的 pause()，保留“由我们暂停”的标记。
@@ -59,29 +83,54 @@
     };
     const onPlay = () => {
       if (!micActive || pauseInProgress) return;
-      queuePauseCheck();
+      queuePauseCheck(0);
     };
 
     video.addEventListener("pause", onPause);
     video.addEventListener("play", onPlay);
-    videoHandlers.set(video, { onPause, onPlay });
+    // 缓冲结束真正开始播放时会触发 playing，这里再检查一次。
+    video.addEventListener("playing", onPlay);
+    watchedVideos.set(video, { onPause, onPlay });
+  }
+
+  function unwatchAll() {
+    for (const [video, { onPause, onPlay }] of watchedVideos) {
+      video.removeEventListener("pause", onPause);
+      video.removeEventListener("play", onPlay);
+      video.removeEventListener("playing", onPlay);
+    }
+    watchedVideos.clear();
+  }
+
+  // 包含 open shadow root 里的 video（部分播放器用 Web Components 封装）。
+  function collectVideos(root, out) {
+    for (const video of root.querySelectorAll("video")) out.push(video);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (node.shadowRoot) collectVideos(node.shadowRoot, out);
+    }
+    return out;
   }
 
   function findPlayingVideos() {
-    return [...document.querySelectorAll("video")].filter((video) => {
+    return collectVideos(document, []).filter((video) => {
       watchVideo(video);
-      return isPlaying(video) && isVisible(video);
+      return isPlaying(video) && !isLiveStream(video) && (isVisible(video) || isAudible(video));
     });
   }
 
-  function queuePauseCheck() {
-    if (enforceTimer !== null) return;
-    // 动态视频站点会持续改 DOM。限制全页扫描频率，避免麦克风打开时
-    // 因播放器和广告节点更新造成额外布局读取；首次 pause 指令仍立即执行。
+  // 动态视频站点会持续改 DOM。DOM 变化触发的检查限制扫描频率，避免麦克风打开时
+  // 因播放器和广告节点更新造成额外布局读取；play 事件和首次 pause 指令立即执行。
+  function queuePauseCheck(delay) {
+    if (enforceTimer !== null || disposed) return;
     enforceTimer = setTimeout(() => {
       enforceTimer = null;
+      if (!isExtensionAlive()) {
+        dispose();
+        return;
+      }
       if (micActive) pauseVideos();
-    }, 50);
+    }, delay);
   }
 
   async function pauseVideos() {
@@ -92,13 +141,18 @@
     pauseInProgress = true;
     let result;
     try {
+      // 站点适配器可能调用播放器自身的 API；它只处理自己认定的主视频。
       result = await Promise.resolve(window.MicPauseRouter?.pause?.(candidates));
     } catch (error) {
-      candidates.forEach((video) => expectedPauses.delete(video));
-      return { paused: false, reason: String(error) };
-    } finally {
-      pauseInProgress = false;
+      result = { reason: String(error) };
     }
+    // 适配器没处理到的（选错了 video、多个视频等）直接暂停，保证不漏。
+    for (const video of candidates) {
+      if (!video.paused) {
+        try { video.pause(); } catch (_error) {}
+      }
+    }
+    pauseInProgress = false;
 
     const paused = candidates.filter((video) => video.paused && !video.ended);
     paused.forEach((video) => pausedByUs.add(video));
@@ -128,8 +182,13 @@
   }
 
   const observer = new MutationObserver(() => {
-    if (micActive) queuePauseCheck();
+    // DOM 变化可能非常频繁，合并成一次检查。
+    if (micActive) queuePauseCheck(50);
   });
+
+  function startWatchingPageChanges() {
+    observer.observe(document, { childList: true, subtree: true });
+  }
 
   function stopWatchingPageChanges() {
     observer.disconnect();
@@ -139,11 +198,17 @@
     }
   }
 
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (!msg || msg.type !== "cmd") return;
+  function onMessage(msg, _sender, sendResponse) {
+    if (disposed || !msg) return;
+    // background 用来确认本页面的 content script 仍在工作。
+    if (msg.type === "ping") {
+      sendResponse({ ok: true });
+      return;
+    }
+    if (msg.type !== "cmd") return;
     if (msg.action === "pause") {
       micActive = true;
-      observer.observe(document, { childList: true, subtree: true });
+      startWatchingPageChanges();
       pauseVideos()
         .then(sendResponse)
         .catch((error) => sendResponse({ paused: false, reason: String(error) }));
@@ -157,5 +222,32 @@
         .catch((error) => sendResponse({ resumed: false, reason: String(error) }));
       return true;
     }
-  });
+  }
+  chrome.runtime.onMessage.addListener(onMessage);
+
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    micActive = false;
+    observer.disconnect();
+    if (enforceTimer !== null) clearTimeout(enforceTimer);
+    enforceTimer = null;
+    unwatchAll();
+    document.removeEventListener("micpause:microphone-started", onMicStarted);
+    document.removeEventListener("micpause:microphone-stopped", onMicStopped);
+    window.removeEventListener("pagehide", onPageHide);
+    try { chrome.runtime.onMessage.removeListener(onMessage); } catch (_error) {}
+  }
+
+  window.__micPauseContent = { dispose };
+
+  // 麦克风已经在使用时，新打开的页面 / iframe 也要暂停之后开始播放的视频。
+  try {
+    chrome.runtime.sendMessage({ type: "get_state" }).then((resp) => {
+      if (disposed || !resp?.shouldPause) return;
+      micActive = true;
+      startWatchingPageChanges();
+      queuePauseCheck(0);
+    }).catch(() => {});
+  } catch (_error) {}
 })();

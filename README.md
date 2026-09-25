@@ -12,12 +12,30 @@
 - **浏览器页面全覆盖**：普通 HTTP/HTTPS 页面上的 `<video>` 都会处理，YouTube、Bilibili、Vimeo、Netflix 有专用适配器
 - **适配器架构**：每个站点单独写 selector / player API，便于按需扩展
 
+## 两个组件分别负责什么
+
+项目由两部分组成，检测范围不同：
+
+| 组件 | 位置 | 能检测到的麦克风占用 |
+|---|---|---|
+| 浏览器扩展（JS） | `extension/` | 仅浏览器网页内的，如 Google Meet 网页版、网页录音 |
+| native host（Swift） | `native-host/mic-monitor` | 整台 Mac 的，包括 Zoom、飞书、腾讯会议、QQ、QuickTime 等桌面应用 |
+
+浏览器扩展无法直接读取系统级麦克风状态，所以由 Swift 编写的 `mic-monitor` 通过 CoreAudio 查询，再经 Chrome native messaging 通知扩展。**只装扩展、不装 native host 时，桌面应用开麦不会暂停视频。**
+
+native host 的检测方式：
+
+- 纯输入设备（内置麦克风、USB 麦克风）：读取设备的 `kAudioDevicePropertyDeviceIsRunningSomewhere`。
+- 同时带输入和输出的设备（USB / 蓝牙耳麦等）：设备级状态不区分输入输出，只播放声音也会变成"运行中"。这类设备改为检查 CoreAudio 进程对象的 `kAudioProcessPropertyIsRunningInput`，即是否真有进程在录音；系统不支持时回退到设备级判断。
+
+点击扩展图标可以确认 native host 是否已连接：若显示"⚠ 未连接 native host（…）"，括号里是 Chrome 给出的原因。
+
 ## 工作流
 
 ```
 麦克风开始使用 ──┬──► Chrome (getUserMedia 劫持) ──┐
                 │                                  ▼
-                └──► CoreAudio (kAudioDevicePropertyDeviceIsRunningSomewhere)
+                └──► native host / CoreAudio（设备运行状态 + 进程输入状态）
                                                        │
                                                        ▼
                           background.js 聚合 micSources 集合
@@ -75,7 +93,15 @@ cd native-host
 - 写入 manifest 到 `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.micpause.host.json`
 
 然后在 `chrome://extensions` 点击扩展的刷新按钮。
-修改或刷新扩展后，也要刷新已经打开的目标网页，让新版本的内容脚本加载。
+
+扩展安装、更新、刷新或重新启用后，会自动检查已打开的网页，给没有被接管的页面补注入脚本，无需逐个刷新页面。万一某个页面的视频仍没有被暂停，点击扩展图标里的 **"接管"** 按钮手动补注入即可；已经正常工作的页面不会被重复注入，也不会丢失暂停状态。
+
+注意事项：
+
+- 解压加载的扩展 ID 由目录路径决定。**移动项目目录后扩展 ID 会变**，需要用新 ID 重跑 `install.sh`。
+- 不要把项目放在 `/tmp`、`~/Downloads`、`~/Desktop`、`~/Documents` 下：可能被系统清理，或因 macOS 隐私保护导致浏览器无法启动 native host。
+- 脚本总会写入 Google Chrome 的配置；若检测到 Chrome Beta/Canary、Chromium、Edge、Brave 的配置目录，也会一并写入。
+- 点击扩展图标，若提示"未连接 native host"，说明只能检测浏览器内的麦克风，桌面应用不会触发暂停，括号里是 Chrome 给出的具体原因。
 
 如果 Chrome 弹出麦克风权限提示，请允许；桌面应用的麦克风使用由 macOS CoreAudio 监听，不需要网页权限。
 
@@ -90,6 +116,20 @@ vim ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.micpau
 ### 3. 重启 Chrome（如果 native host 仍未连接）
 
 让 Chrome 重新加载 native messaging 配置。
+
+## 更新
+
+拉取新代码后，按改动的部分操作：
+
+- **只改了 `extension/`**：在 `chrome://extensions` 点击扩展的刷新按钮即可，已打开的网页会自动接管（必要时点扩展图标里的"接管"按钮）。
+- **改了 `native-host/mic-monitor.swift`**：需要重新编译，然后刷新扩展让它重新启动 native host。项目目录和扩展 ID 没变时不需要重新注册：
+
+  ```bash
+  cd native-host
+  ./build.sh
+  ```
+
+- **移动了项目目录或扩展 ID 变了**：重跑 `./install.sh <扩展 ID>`。
 
 ## 验证
 
@@ -111,21 +151,18 @@ vim ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.micpau
 
 ## 添加新站点
 
-每个适配器是一个对象，导出 `match/pause/play`：
+`content.js` 会先筛选出所有应当暂停的正在播放的 `<video>`（`candidates`），再交给站点适配器；适配器可以用播放器自己的 API 暂停主视频，没处理到的候选视频由 `content.js` 兜底直接暂停。恢复播放由 `content.js` 统一处理，只恢复由插件暂停的视频，适配器不需要实现。
+
+每个适配器是一个对象，导出 `match/pause`：
 
 ```js
 window.MicPauseAdapter.example = {
   match() { return location.hostname.endsWith("example.com"); },
-  pause() {
-    const v = document.querySelector("video");
+  pause(candidates = []) {
+    const v = candidates.find((v) => v.matches(".main-player video")) || candidates[0];
     if (!v || v.paused) return { paused: false, reason: "not playing" };
     v.pause();
     return { paused: true, elementId: "ex-video" };
-  },
-  play() {
-    const v = document.querySelector("video");
-    if (v?.paused) v.play().catch(() => {});
-    return { resumed: true };
   },
 };
 ```
@@ -135,10 +172,13 @@ window.MicPauseAdapter.example = {
 ## 已知限制
 
 - **只支持 macOS**：native host 用了 CoreAudio。Linux/Windows 需要重写 monitor（PulseAudio / WASAPI）。
-- **Chrome 102+**：用了 Manifest V3 和主世界内容脚本。
+- **Chrome 105+**：用了 Manifest V3、主世界内容脚本，并依赖 native messaging 连接让 service worker 保持存活。
 - **权限范围**：扩展需要 `<all_urls>` 才能控制任意网页视频；Native host 只监听麦克风输入设备的使用状态，不读取或保存音频内容。
-- **service worker 休眠**：Chrome 的 service worker 在 30 秒无活动后会休眠，这期间 native host 也会被断开。但 macOS 上 listener 是在 host 进程里跑的，断开后 host 进程会被 Chrome 杀掉（数据丢失）。下次启动时 `init` 消息会重新汇报状态。
+- **service worker 重启**：Chrome 105+ 中 native messaging 连接会让 service worker 保持存活；若 service worker 仍被重启，重新连接后 `init` 消息会重新汇报状态。
 - **受限页面**：普通 HTTP/HTTPS 页面及匹配来源的 `about:blank` frame 会注入脚本；浏览器商店、扩展页和被 sandbox 限制的 frame 仍受 Chrome 权限限制。
+- **iframe / Shadow DOM**：内容脚本注入所有 frame（`all_frames`），iframe 内的视频也会暂停；open shadow root 内的视频会被找到，closed shadow root 无法访问。
+- **不暂停的视频**：网页会议的实时画面（`srcObject` 为 `MediaStream`）、尺寸小于 200×100 且静音的视频（通常是预览或装饰动画）。
+- **耳麦类设备**：同时带输入和输出的设备（USB/蓝牙耳麦）在不支持 CoreAudio 进程对象的旧版 macOS 上只能用设备级状态判断，播放声音也可能被误判为麦克风占用。
 
 ## 调试
 

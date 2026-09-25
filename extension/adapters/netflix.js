@@ -4,31 +4,24 @@
 (function () {
   const ADAPTER = (window.MicPauseAdapter = window.MicPauseAdapter || {});
 
-  function findVideo() {
-    return document.querySelector("video");
+  function findVideo(candidates) {
+    return candidates[0] || document.querySelector("video");
   }
 
   ADAPTER.netflix = {
     name: "netflix",
     match() {
-      return location.hostname.endsWith("netflix.com");
+      return /(^|\.)netflix\.com$/.test(location.hostname);
     },
 
-    pause() {
-      const v = findVideo();
+    pause(candidates = []) {
+      const v = findVideo(candidates);
       if (!v) return { paused: false, reason: "no video" };
-      if (v.paused || v.ended || v.readyState < 2) {
+      if (v.paused || v.ended) {
         return { paused: false, reason: "not playing" };
       }
       v.pause();
       return { paused: true, elementId: "nf-video" };
-    },
-
-    play() {
-      const v = findVideo();
-      if (!v) return { resumed: false };
-      if (v.paused) v.play().catch(() => {});
-      return { resumed: true };
     },
   };
 })();

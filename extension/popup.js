@@ -62,14 +62,35 @@
     siteMessage.textContent = `已移除 ${site}。`;
   });
 
-  chrome.runtime.sendMessage({ type: "get_state" }, (resp) => {
-    if (chrome.runtime.lastError || !resp) {
-      status.textContent = "未连接到 background。";
-      return;
-    }
-    setStatus(resp);
+  // 手动兜底：给已打开但没有被接管的页面补注入脚本
+  const ensureBtn = document.getElementById("ensure");
+  ensureBtn.addEventListener("click", () => {
+    ensureBtn.disabled = true;
+    ensureBtn.textContent = "处理中…";
+    chrome.runtime.sendMessage({ type: "ensure_content_scripts" }, (resp) => {
+      ensureBtn.disabled = false;
+      if (chrome.runtime.lastError || !resp || resp.error) {
+        ensureBtn.textContent = "失败，重试";
+        return;
+      }
+      ensureBtn.textContent = resp.injected > 0 ? `已接管 ${resp.injected} 个` : "均已接管";
+      setTimeout(() => { ensureBtn.textContent = "接管"; }, 2500);
+    });
   });
 
+  // 拉取当前状态
+  function refresh() {
+    chrome.runtime.sendMessage({ type: "get_state" }, (resp) => {
+      if (chrome.runtime.lastError || !resp) {
+        status.textContent = "未连接到 background。";
+        return;
+      }
+      setStatus(resp);
+    });
+  }
+  refresh();
+
+  // 监听 storage 变化，保持 popup 同步
   chrome.storage.onChanged.addListener((changes) => {
     if (changes.enabled) setToggle(changes.enabled.newValue !== false);
     if (changes.excludedSites) {
@@ -79,11 +100,7 @@
   });
 
   // 保持麦克风状态实时更新；例外网站设置通过 storage 事件同步。
-  setInterval(() => {
-    chrome.runtime.sendMessage({ type: "get_state" }, (resp) => {
-      if (resp) setStatus(resp);
-    });
-  }, 1000);
+  setInterval(refresh, 1000);
 
   function normalizeHost(host) {
     return String(host || "")
@@ -160,10 +177,13 @@
       status.textContent = "已关闭 — 不会自动暂停";
       return;
     }
-    if (state.micActive) {
-      status.textContent = `麦克风使用中：${state.sources.join(", ")}`;
-    } else {
-      status.textContent = "麦克风空闲";
-    }
+    const mic = state.micActive
+      ? `麦克风使用中：${state.sources.join(", ")}`
+      : "麦克风空闲";
+    // native host 没连上时只能检测到浏览器内的麦克风，桌面应用不会触发暂停。
+    const native = state.nativeConnected
+      ? ""
+      : `\n⚠ 未连接 native host，桌面应用的麦克风无法检测${state.nativeError ? `（${state.nativeError}）` : ""}`;
+    status.textContent = mic + native;
   }
 })();

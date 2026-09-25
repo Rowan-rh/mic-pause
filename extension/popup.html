@@ -71,6 +71,18 @@
       transition: transform 0.2s;
     }
     .toggle.on::after { transform: translateX(14px); }
+    .btn {
+      background: #3a3a3c;
+      color: var(--fg);
+      border: 0;
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .btn:hover { background: #48484a; }
+    .btn:disabled { opacity: 0.5; cursor: default; }
     .status {
       font-size: 11px;
       color: var(--muted);
@@ -78,7 +90,8 @@
       padding: 6px 8px;
       background: #2c2c2e;
       border-radius: 6px;
-      word-break: break-all;
+      overflow-wrap: anywhere;
+      white-space: pre-line;
     }
     .section {
       padding-top: 14px;
@@ -178,6 +191,14 @@
       <div class="sub">关闭后将不自动暂停视频</div>
     </div>
     <div id="toggle" class="toggle on"></div>
+  </div>
+
+  <div class="row">
+    <div>
+      <div class="label">接管已打开的页面</div>
+      <div class="sub">页面视频没被暂停时点一下，无需刷新页面</div>
+    </div>
+    <button id="ensure" class="btn">接管</button>
   </div>
 
   <div class="status" id="status">连接 native host...</div>

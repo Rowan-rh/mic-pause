@@ -54,6 +54,14 @@
     }
   }
 
+  // 页面刷新或跳转时不会有 track ended 事件，主动报告释放，避免残留的
+  // 麦克风来源让其它页面的视频一直处于暂停状态。
+  window.addEventListener("pagehide", () => {
+    if (activeStreams.size === 0) return;
+    activeStreams.clear();
+    emit("micpause:microphone-stopped");
+  });
+
   mediaDevices.getUserMedia = function (...args) {
     const constraints = args[0];
     const wantsAudio = constraints && (
