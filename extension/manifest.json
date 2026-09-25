@@ -3,9 +3,10 @@
   "name": "Mic Pause — 麦克风占用自动暂停视频",
   "version": "0.1.0",
   "description": "检测 macOS 麦克风占用，自动暂停浏览器视频；麦克风释放后恢复插件暂停的视频。",
-  "minimum_chrome_version": "102",
+  "minimum_chrome_version": "105",
   "permissions": [
     "nativeMessaging",
+    "scripting",
     "storage",
     "tabs"
   ],
@@ -28,13 +29,17 @@
         "adapters/index.js",
         "content.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
     },
     {
       "matches": ["http://*/*", "https://*/*"],
       "js": ["page-bridge.js"],
       "run_at": "document_start",
-      "world": "MAIN"
+      "world": "MAIN",
+      "all_frames": true,
+      "match_about_blank": true
     }
   ],
   "action": {
